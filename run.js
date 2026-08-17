@@ -112,8 +112,27 @@
     return container;
   };
 
-  let pos = null;
-  let orientation = 'vertical';
+  const STORAGE_KEY = 'zeta_tabbar_pos_v1';
+
+  const loadSavedPos = () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (typeof data.x === 'number' && typeof data.y === 'number') return data;
+    } catch (e) {}
+    return null;
+  };
+
+  const savePos = () => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: pos.x, y: pos.y, orientation }));
+    } catch (e) {}
+  };
+
+  const saved = loadSavedPos();
+  let pos = saved ? { x: saved.x, y: saved.y } : null;
+  let orientation = saved?.orientation || 'vertical';
   let lastAccent = null;
 
   const applyStyle = (container, force) => {
