@@ -126,13 +126,19 @@
 
   const savePos = () => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: pos.x, y: pos.y, orientation }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: pos.x, y: pos.y }));
     } catch (e) {}
+  };
+
+  const computeOrientation = () => {
+    const h = window.innerHeight;
+    const topZone = h * 0.22, bottomZone = h * 0.78;
+    return (pos.y < topZone || pos.y > bottomZone) ? 'horizontal' : 'vertical';
   };
 
   const saved = loadSavedPos();
   let pos = saved ? { x: saved.x, y: saved.y } : null;
-  let orientation = saved?.orientation || 'vertical';
+  let orientation = 'vertical';
   let lastAccent = null;
 
   const applyStyle = (container, force) => {
@@ -145,21 +151,11 @@
       container.dataset.dragSetup = 'true';
       container.style.setProperty('position', 'fixed', 'important');
       if (!pos) pos = { x: window.innerWidth - 90, y: window.innerHeight - 320 };
+      pos.x = Math.min(Math.max(pos.x, 0), window.innerWidth - 40);
+      pos.y = Math.min(Math.max(pos.y, 0), window.innerHeight - 40);
+      orientation = computeOrientation();
 
       let dragging = false, ox = 0, oy = 0;
-
-      const updateOrientation = () => {
-        const w = window.innerWidth, h = window.innerHeight;
-        const centerXmin = w * 0.25, centerXmax = w * 0.75;
-        const topZone = h * 0.18, bottomZone = h * 0.82;
-        const cx = pos.x + 24;
-        if (cx > centerXmin && cx < centerXmax && (pos.y < topZone || pos.y > bottomZone)) {
-          orientation = 'horizontal';
-        } else {
-          orientation = 'vertical';
-        }
-        applyStyle(container, true);
-      };
 
       const start = e => {
         dragging = true;
@@ -182,7 +178,9 @@
       const end = () => {
         if (!dragging) return;
         dragging = false;
-        updateOrientation();
+        orientation = computeOrientation();
+        applyStyle(container, true);
+        savePos();
       };
 
       container.addEventListener('touchstart', start, { passive: true });
