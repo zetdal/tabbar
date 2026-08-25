@@ -26,6 +26,18 @@
     return '#' + hex(r) + hex(g) + hex(b);
   };
 
+  const normalizeColorValue = (raw) => {
+    if (!raw) return null;
+    raw = raw.trim();
+    if (!raw) return null;
+    if (/^#[0-9a-fA-F]{3,8}$/.test(raw)) {
+      return raw.length === 4
+        ? '#' + [...raw.slice(1)].map(c => c + c).join('')
+        : raw;
+    }
+    return parseColor(raw);
+  };
+
   const VAR_CANDIDATES = [
     '--accent', '--accent-color', '--primary', '--primary-color',
     '--theme-color', '--brand', '--brand-color', '--color-primary',
@@ -37,16 +49,25 @@
     for (const root of roots) {
       const cs = getComputedStyle(root);
       for (const name of VAR_CANDIDATES) {
-        const raw = cs.getPropertyValue(name)?.trim();
-        if (!raw) continue;
-        if (/^#[0-9a-fA-F]{3,8}$/.test(raw)) return raw.length === 4
-          ? '#' + [...raw.slice(1)].map(c => c + c).join('')
-          : raw;
-        const c = parseColor(raw);
+        const c = normalizeColorValue(cs.getPropertyValue(name));
         if (c) return c;
       }
     }
     return null;
+  };
+
+  // 1순위: {{user}} 말풍선 색 (아래 getAccentFromBubble)
+  // 2순위: 대화 하이라이터 색 (merged-v1 테마의 --dialogue-hl 변수)
+  const getAccentFromHighlighter = () => {
+    const cs = getComputedStyle(document.documentElement);
+    return normalizeColorValue(cs.getPropertyValue('--dialogue-hl'));
+  };
+
+  // 3순위: 입력창 전송 버튼 색
+  const getAccentFromSendButton = () => {
+    const btn = document.querySelector('[data-testid="chat-send-button"]');
+    if (!btn) return null;
+    return normalizeColorValue(getComputedStyle(btn).backgroundColor);
   };
 
   let cachedBubbleEl = null;
@@ -70,7 +91,11 @@
   };
 
   const getAccent = () => {
-    return getAccentFromCssVars() || getAccentFromBubble() || '#FF8A65';
+    return getAccentFromBubble()
+      || getAccentFromHighlighter()
+      || getAccentFromSendButton()
+      || getAccentFromCssVars()
+      || '#FF8A65';
   };
 
   const findToggle = () => {
