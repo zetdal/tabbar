@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta 탭바 위치 조정 (드래그 가능)
 // @namespace    zeta-tabbar-reposition
-// @version      1.4
-// @description  Zeta AI 탭바를 화면 아무 곳에나 드래그해서 배치, 세로/가로 자동 전환 (v1.4: 위치를 바깥 제타 페이지에 저장 → 새로고침해도 유지)
+// @version      1.5
+// @description  Zeta AI 탭바를 화면 아무 곳에나 드래그해서 배치, 세로/가로 자동 전환 (v1.5: 흔들림·렉 수정, 위치는 바깥 제타 페이지에 저장)
 // @match        https://zeta-ai.io/*
 // @match        https://frame.pingpong.ai/*
 // @grant        none
@@ -47,6 +47,9 @@
 //        바깥 페이지와 iframe 양쪽에서 모두 동작 (탭바가 있는 쪽에서만 실제로 적용됨)
 (() => {
   'use strict';
+  // [v1.5] 한 화면에서 두 번 실행되면 서로 위치를 당겨서 흔들리므로 한 번만
+  if (window.__ZETA_TABBAR_MAIN__) return;
+  window.__ZETA_TABBAR_MAIN__ = true;
 
   // ---------- [v1.4] 바깥 페이지 저장 다리 ----------
   // 사파리는 채팅 iframe(frame.pingpong.ai) 안의 저장공간을 임시로만 씀 (새로고침·앱 종료 시 사라짐).
@@ -249,26 +252,35 @@
     return container;
   };
 
-  const STORAGE_KEY = 'zeta_tabbar_pos_v1';
-  const topStore = makeTopStore('tabbar', [STORAGE_KEY]);
+  // ---------- 위치 저장 ----------
+  // v1: ZETAKIT 기본 스타일(가운데 정렬용 translateX(-50%))이 남아 있던 시절 값
+  // v2(v1.5~): 그 기울임을 없애고 화면에 보이는 왼쪽 위 좌표 그대로 저장
+  const KEY_V1 = 'zeta_tabbar_pos_v1';
+  const KEY_V2 = 'zeta_tabbar_pos_v2';
+  const topStore = makeTopStore('tabbar', [KEY_V1, KEY_V2]);
   let userMoved = false;
 
-  const loadSavedPos = () => {
+  const parsePos = (raw, v) => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const data = JSON.parse(raw);
-      if (typeof data.x === 'number' && typeof data.y === 'number') return data;
+      const d = JSON.parse(raw);
+      if (d && typeof d.x === 'number' && typeof d.y === 'number') return { x: d.x, y: d.y, v };
     } catch (e) {}
     return null;
   };
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const loadSavedPos = () => parsePos(lsGet(KEY_V2), 2) || parsePos(lsGet(KEY_V1), 1);
 
   const savePos = () => {
-    const raw = JSON.stringify({ x: pos.x, y: pos.y });
-    if (topStore) { topStore.set(STORAGE_KEY, raw); return; }
-    try {
-      localStorage.setItem(STORAGE_KEY, raw);
-    } catch (e) {}
+    const raw = JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) });
+    if (topStore) { topStore.set(KEY_V2, raw); return; }
+    try { localStorage.setItem(KEY_V2, raw); } catch (e) {}
+  };
+
+  const clampPos = (p, el) => {
+    const w = el ? el.offsetWidth : 40, h = el ? el.offsetHeight : 40;
+    p.x = Math.min(Math.max(p.x, 0), Math.max(0, window.innerWidth - Math.min(w, 60)));
+    p.y = Math.min(Math.max(p.y, 0), Math.max(0, window.innerHeight - Math.min(h, 40)));
+    return p;
   };
 
   const computeOrientation = () => {
@@ -277,92 +289,73 @@
     return (pos.y < topZone || pos.y > bottomZone) ? 'horizontal' : 'vertical';
   };
 
-  const saved = loadSavedPos();
-  let pos = saved ? { x: saved.x, y: saved.y } : null;
+  let pos = loadSavedPos();
   let orientation = 'vertical';
-  let lastAccent = null;
+  let barEl = null;      // 찾아둔 탭바
+  let applied = '';      // 마지막으로 적용한 상태 (같으면 다시 안 씀)
 
   // [v1.4] iframe 안에서는 바깥에 저장된 위치를 불러와서 적용
   if (topStore) {
-    topStore.get(STORAGE_KEY).then((raw) => {
-      if (!raw || userMoved) return;
-      try {
-        const data = JSON.parse(raw);
-        if (typeof data.x !== 'number' || typeof data.y !== 'number') return;
-        try { localStorage.setItem(STORAGE_KEY, raw); } catch (e) {}
-        pos = { x: Math.min(Math.max(data.x, 0), window.innerWidth - 40), y: Math.min(Math.max(data.y, 0), window.innerHeight - 40) };
-        orientation = computeOrientation();
-        const bar = findTabBar();
-        if (bar) applyStyle(bar, true);
-      } catch (e) {}
+    Promise.all([topStore.get(KEY_V2), topStore.get(KEY_V1)]).then(([r2, r1]) => {
+      if (userMoved) return;
+      const p = parsePos(r2, 2) || parsePos(r1, 1);
+      if (!p) return;
+      pos = p;
+      if (barEl && barEl.isConnected) placeBar(barEl, true);
     });
   }
 
-  const applyStyle = (container, force) => {
-    if (!container) return;
-    const accent = getAccent();
-    if (!force && accent === lastAccent && container.dataset.dragSetup) return;
-    lastAccent = accent;
-
-    if (!container.dataset.dragSetup) {
-      container.dataset.dragSetup = 'true';
-      container.style.setProperty('position', 'fixed', 'important');
-      if (!pos) pos = { x: window.innerWidth - 90, y: window.innerHeight - 320 };
-      pos.x = Math.min(Math.max(pos.x, 0), window.innerWidth - 40);
-      pos.y = Math.min(Math.max(pos.y, 0), window.innerHeight - 40);
-      orientation = computeOrientation();
-
-      let dragging = false, ox = 0, oy = 0;
-
-      const start = e => {
-        dragging = true;
-        const t = e.touches ? e.touches[0] : e;
-        ox = t.clientX - pos.x;
-        oy = t.clientY - pos.y;
-      };
-
-      const move = e => {
-        if (!dragging) return;
-        const t = e.touches ? e.touches[0] : e;
-        pos = { x: t.clientX - ox, y: t.clientY - oy };
-        container.style.setProperty('left', pos.x + 'px', 'important');
-        container.style.setProperty('top', pos.y + 'px', 'important');
-        container.style.setProperty('right', 'auto', 'important');
-        container.style.setProperty('bottom', 'auto', 'important');
-        e.preventDefault();
-      };
-
-      const end = () => {
-        if (!dragging) return;
-        dragging = false;
-        userMoved = true;
-        orientation = computeOrientation();
-        applyStyle(container, true);
-        savePos();
-      };
-
-      container.addEventListener('touchstart', start, { passive: true });
-      container.addEventListener('touchmove', move, { passive: false });
-      container.addEventListener('touchend', end, { passive: true });
-      container.addEventListener('mousedown', start);
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', end);
-    }
-
+  // 위치/방향만 적용 (값이 바뀔 때만 실제로 씀 → 화면 흔들림·렉 방지)
+  const placeBar = (el, force) => {
+    if (!pos) pos = { x: window.innerWidth - 90, y: window.innerHeight - 320, v: 2 };
+    if (force) applied = '';
+    orientation = computeOrientation();
     const isH = orientation === 'horizontal';
-    Object.assign(container.style, {
-      position: 'fixed',
-      left: pos.x + 'px',
-      top: pos.y + 'px',
-      right: 'auto',
-      bottom: 'auto',
-      display: 'flex',
-      flexDirection: isH ? 'row' : 'column',
-      flexWrap: 'nowrap',
-      gap: '3px',
-      zIndex: 9999,
-      width: 'auto'
-    });
+    const state = [Math.round(pos.x), Math.round(pos.y), orientation, lastAccent].join('|');
+    // 다른 코드가 위치를 바꿔놨으면 다시 맞춤
+    const drifted = el.style.left !== Math.round(pos.x) + 'px' || el.style.top !== Math.round(pos.y) + 'px';
+    if (state === applied && !drifted) return;
+    applied = state;
+
+    const set = (k, v) => { if (el.style.getPropertyValue(k) !== v || el.style.getPropertyPriority(k) !== 'important') el.style.setProperty(k, v, 'important'); };
+    set('position', 'fixed');
+    set('transform', 'none');           // ZETAKIT 기본 가운데 정렬(translateX(-50%)) 끔
+    set('right', 'auto');
+    set('bottom', 'auto');
+    set('display', 'flex');
+    set('flex-direction', isH ? 'row' : 'column');
+    set('flex-wrap', 'nowrap');
+    set('gap', '3px');
+    set('z-index', '9999');
+    set('width', 'auto');
+    set('max-width', 'calc(100vw - 8px)');
+    set('transition', 'none');
+
+    // v1 저장값(가운데 정렬 기준) → 실제 왼쪽 좌표로 한 번만 바꿔서 저장
+    if (pos.v === 1) {
+      set('left', Math.round(pos.x) + 'px');
+      set('top', Math.round(pos.y) + 'px');
+      pos.x = pos.x - el.offsetWidth / 2;
+      pos.v = 2;
+      clampPos(pos, el);
+      savePos();
+      applied = [Math.round(pos.x), Math.round(pos.y), orientation, lastAccent].join('|');
+    }
+    set('left', Math.round(pos.x) + 'px');
+    set('top', Math.round(pos.y) + 'px');
+  };
+
+  let lastAccent = null;
+  let paintedAccent = null;
+  let paintedOrientation = null;
+
+  // 색/버튼 모양 (색이나 방향이 바뀔 때만)
+  const paintBar = (container, accent) => {
+    const isH = orientation === 'horizontal';
+    if (accent === paintedAccent && orientation === paintedOrientation && container.dataset.ztPainted === '1') return;
+    paintedAccent = accent;
+    paintedOrientation = orientation;
+    container.dataset.ztPainted = '1';
 
     container.style.setProperty('background', '#FFFFFF', 'important');
     container.style.setProperty('border', '1px solid ' + accent + '40', 'important');
@@ -392,8 +385,60 @@
     });
   };
 
+  const setupDrag = (container) => {
+    if (container.dataset.dragSetup) return;
+    container.dataset.dragSetup = 'true';
+    let dragging = false, ox = 0, oy = 0;
+
+    const start = e => {
+      dragging = true;
+      const t = e.touches ? e.touches[0] : e;
+      ox = t.clientX - pos.x;
+      oy = t.clientY - pos.y;
+    };
+    const move = e => {
+      if (!dragging) return;
+      const t = e.touches ? e.touches[0] : e;
+      pos = clampPos({ x: t.clientX - ox, y: t.clientY - oy, v: 2 }, container);
+      container.style.setProperty('left', Math.round(pos.x) + 'px', 'important');
+      container.style.setProperty('top', Math.round(pos.y) + 'px', 'important');
+      e.preventDefault();
+    };
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      userMoved = true;
+      applyStyle(container, true);
+      savePos();
+    };
+
+    container.addEventListener('touchstart', start, { passive: true });
+    container.addEventListener('touchmove', move, { passive: false });
+    container.addEventListener('touchend', end, { passive: true });
+    container.addEventListener('touchcancel', end, { passive: true });
+    container.addEventListener('mousedown', start);
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', end);
+  };
+
+  const applyStyle = (container, force) => {
+    if (!container) return;
+    lastAccent = getAccent();
+    setupDrag(container);
+    placeBar(container, force);
+    paintBar(container, lastAccent);
+  };
+
+  // 탭바 찾기: 찾아둔 게 살아 있으면 그대로, ZETAKIT 탭바는 id로 바로 (무거운 전체 검색은 최소화)
+  const getBar = () => {
+    if (barEl && barEl.isConnected) return barEl;
+    barEl = document.getElementById('zk_review_quickbar') || findTabBar();
+    if (barEl) { applied = ''; paintedAccent = null; }
+    return barEl;
+  };
+
   const tryOpen = () => {
-    const bar = findTabBar();
+    const bar = getBar();
     if (bar && bar.offsetParent !== null) {
       applyStyle(bar, true);
       return true;
@@ -411,39 +456,36 @@
     attempts++;
   }, 150);
 
+  // 탭바가 새로 생기는지만 가볍게 감시 (속성 변화까지 보면 스타일 쓸 때마다 다시 불려서 렉 유발)
+  let moTimer = null;
   const observer = new MutationObserver(() => {
-    const bar = findTabBar();
-    if (bar) applyStyle(bar, false);
+    if (barEl && barEl.isConnected) return;
+    if (moTimer) return;
+    moTimer = setTimeout(() => {
+      moTimer = null;
+      const bar = getBar();
+      if (bar) applyStyle(bar, true);
+    }, 200);
   });
-  observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+  const startObserve = () => observer.observe(document.body, { childList: true, subtree: true });
+  if (document.body) startObserve(); else document.addEventListener('DOMContentLoaded', startObserve);
 
+  // 색 바뀜 / 다른 코드가 위치를 건드렸는지 1초마다 확인 (바뀐 게 없으면 아무것도 안 씀)
   const refreshColor = () => {
-    const bar = findTabBar();
-    if (bar) applyStyle(bar, true);
+    const bar = getBar();
+    if (bar) applyStyle(bar, false);
   };
-
-  const colorWatch = setInterval(refreshColor, 300);
+  const colorWatch = setInterval(refreshColor, 1000);
 
   document.addEventListener('click', () => {
-    setTimeout(refreshColor, 50);
     setTimeout(refreshColor, 250);
   }, { capture: true, passive: true });
 
-  let bubbleObserver = null;
-  const watchBubble = () => {
-    getAccentFromBubble();
-    if (!cachedBubbleEl) return;
-    if (bubbleObserver) bubbleObserver.disconnect();
-    bubbleObserver = new MutationObserver(() => {
-      refreshColor();
-    });
-    bubbleObserver.observe(cachedBubbleEl, { attributes: true, attributeFilter: ['style', 'class'] });
-  };
-  setInterval(watchBubble, 1000);
-
-  setInterval(() => {
-    window.dispatchEvent(new Event('resize'));
-  }, 2000);
+  window.addEventListener('resize', () => {
+    if (!barEl || !barEl.isConnected || !pos) return;
+    clampPos(pos, barEl);
+    placeBar(barEl, false);
+  });
 
   window.__ZETA_TABBAR_REPOSITION__ = observer;
   window.__ZETA_TABBAR_COLORWATCH__ = colorWatch;
