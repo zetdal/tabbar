@@ -1,15 +1,112 @@
 // ==UserScript==
 // @name         Zeta 탭바 위치 조정 (드래그 가능)
 // @namespace    zeta-tabbar-reposition
-// @version      1.1
-// @description  Zeta AI 탭바를 화면 아무 곳에나 드래그해서 배치, 세로/가로 자동 전환
+// @version      1.4
+// @description  Zeta AI 탭바를 화면 아무 곳에나 드래그해서 배치, 세로/가로 자동 전환 (v1.4: 위치를 바깥 제타 페이지에 저장 → 새로고침해도 유지)
 // @match        https://zeta-ai.io/*
+// @match        https://frame.pingpong.ai/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
 
+// ---------- [v1.2] 채팅 iframe 쪽: 유저 말풍선 색을 바깥 페이지로 전달 ----------
+// 채팅방이 frame.pingpong.ai iframe 안으로 옮겨져서 바깥 페이지(탭바가 있는 곳)에서는 말풍선 색을 직접 못 읽음.
+// → iframe 안에서 색을 읽어 바깥으로 보내주고, 바깥 탭바는 그 색을 1순위로 사용.
 (() => {
   'use strict';
+  if (!/(^|\.)pingpong\.ai$/.test(location.hostname)) return;
+  if (window.__ZETA_TABBAR_ACCENT_FRAME__) return;
+  window.__ZETA_TABBAR_ACCENT_FRAME__ = true;
+
+  const readBubbleColor = () => {
+    const bubble = document.querySelector(
+      '[class*="bg-bubble-user"],[class*="fruit-user-bubble"],.self-end[class*="rounded-l-xl"]'
+    );
+    if (!bubble) return null;
+    const cs = getComputedStyle(bubble);
+    const bw = parseFloat(cs.borderTopWidth || '0');
+    if (bw >= 1 && cs.borderTopColor) return { border: cs.borderTopColor, bg: cs.backgroundColor };
+    return { border: null, bg: cs.backgroundColor };
+  };
+
+  const send = () => {
+    const c = readBubbleColor();
+    if (!c) return;
+    try {
+      window.parent.postMessage({ type: 'zeta-tabbar-accent', border: c.border, bg: c.bg }, '*');
+    } catch (e) {}
+  };
+
+  // 테마가 늦게 적용되거나 색이 바뀌는 경우까지 따라가도록 주기적으로 전송 (가벼운 작업)
+  send();
+  setInterval(send, 1000);
+})();
+
+// ---------- 탭바 위치/색 조정 ----------
+// [v1.3] ZETAKIT을 채팅 iframe 안에서 실행하면 탭바(퀵바)도 iframe 안에 생기므로
+//        바깥 페이지와 iframe 양쪽에서 모두 동작 (탭바가 있는 쪽에서만 실제로 적용됨)
+(() => {
+  'use strict';
+
+  // ---------- [v1.4] 바깥 페이지 저장 다리 ----------
+  // 사파리는 채팅 iframe(frame.pingpong.ai) 안의 저장공간을 임시로만 씀 (새로고침·앱 종료 시 사라짐).
+  // → iframe 안에서는 바깥 제타 페이지(zeta-ai.io) 저장공간에 대신 저장하고 불러옴.
+  //   (바깥 페이지에서도 이 스크립트가 돌면서 iframe의 부탁을 받아 처리)
+  const makeTopStore = (owner, keys) => {
+    const TOP_RE = /^https:\/\/([a-z0-9-]+\.)*zeta-ai\.io$/;
+    const FRAME_RE = /^https:\/\/([a-z0-9-]+\.)*pingpong\.ai$/;
+    const allowed = (k) => keys.indexOf(k) >= 0;
+    if (window.top === window) {
+      // 바깥 페이지: iframe 부탁 처리
+      if (!TOP_RE.test(location.origin) || window['__ZTS_' + owner]) return null;
+      window['__ZTS_' + owner] = true;
+      window.addEventListener('message', (e) => {
+        if (!FRAME_RE.test(e.origin) || !e.source) return;
+        const d = e.data;
+        if (!d || d.__zts !== 1 || d.owner !== owner || !allowed(d.key)) return;
+        let value = null;
+        try {
+          if (d.op === 'get') value = localStorage.getItem(d.key);
+          else if (d.op === 'set') localStorage.setItem(d.key, d.value);
+        } catch (err) {}
+        try { e.source.postMessage({ __zts: 1, owner, reply: d.id, value }, e.origin); } catch (err) {}
+      });
+      return null;
+    }
+    // iframe 안
+    let parentOrigin = null;
+    try {
+      const ao = location.ancestorOrigins && location.ancestorOrigins[0];
+      if (ao && TOP_RE.test(ao)) parentOrigin = ao;
+    } catch (e) {}
+    if (!parentOrigin) {
+      try { const r = new URL(document.referrer).origin; if (TOP_RE.test(r)) parentOrigin = r; } catch (e) {}
+    }
+    let seq = 0;
+    const waiting = new Map();
+    window.addEventListener('message', (e) => {
+      if (!TOP_RE.test(e.origin)) return;
+      const d = e.data;
+      if (!d || d.__zts !== 1 || d.owner !== owner || !waiting.has(d.reply)) return;
+      waiting.get(d.reply)(d.value);
+    });
+    const ask = (op, key, value) => new Promise((resolve) => {
+      if (!parentOrigin) { resolve(undefined); return; }
+      const id = owner + '_' + (++seq) + '_' + Date.now();
+      const timer = setTimeout(() => { waiting.delete(id); resolve(undefined); }, 2500);
+      waiting.set(id, (v) => { clearTimeout(timer); waiting.delete(id); resolve(v); });
+      try { window.parent.postMessage({ __zts: 1, owner, id, op, key, value }, parentOrigin); }
+      catch (e) { clearTimeout(timer); waiting.delete(id); resolve(undefined); }
+    });
+    return {
+      // 바깥 값 (문자열 또는 null). 바깥 응답이 없으면 undefined
+      get: (key) => ask('get', key),
+      set: (key, value) => {
+        try { localStorage.setItem(key, value); } catch (e) {}
+        return ask('set', key, value);
+      },
+    };
+  };
 
   // 로어 버튼 추가됨 (2026-08 업데이트)
   const LABELS = ['검토', '새답변', '추천', '무응답', '퀵', '이력', '로어', '설정', '×', 'X', 'x'];
@@ -90,8 +187,23 @@
     return null;
   };
 
+  // [v1.2] iframe에서 받은 유저 말풍선 색 (테두리 색 우선, 없으면 배경색 — 예전 getAccentFromBubble과 같은 기준)
+  let frameAccent = null;
+  window.addEventListener('message', (e) => {
+    if (!/^https:\/\/([a-z0-9-]+\.)*pingpong\.ai$/.test(e.origin)) return;
+    const d = e.data;
+    if (!d || d.type !== 'zeta-tabbar-accent') return;
+    const c = (d.border && parseColor(d.border)) || (d.bg && parseColor(d.bg)) || null;
+    if (c && c !== frameAccent) {
+      frameAccent = c;
+      const bar = findTabBar();
+      if (bar) applyStyle(bar, true);
+    }
+  });
+
   const getAccent = () => {
-    return getAccentFromBubble()
+    return frameAccent
+      || getAccentFromBubble()
       || getAccentFromHighlighter()
       || getAccentFromSendButton()
       || getAccentFromCssVars()
@@ -138,6 +250,8 @@
   };
 
   const STORAGE_KEY = 'zeta_tabbar_pos_v1';
+  const topStore = makeTopStore('tabbar', [STORAGE_KEY]);
+  let userMoved = false;
 
   const loadSavedPos = () => {
     try {
@@ -150,8 +264,10 @@
   };
 
   const savePos = () => {
+    const raw = JSON.stringify({ x: pos.x, y: pos.y });
+    if (topStore) { topStore.set(STORAGE_KEY, raw); return; }
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ x: pos.x, y: pos.y }));
+      localStorage.setItem(STORAGE_KEY, raw);
     } catch (e) {}
   };
 
@@ -165,6 +281,22 @@
   let pos = saved ? { x: saved.x, y: saved.y } : null;
   let orientation = 'vertical';
   let lastAccent = null;
+
+  // [v1.4] iframe 안에서는 바깥에 저장된 위치를 불러와서 적용
+  if (topStore) {
+    topStore.get(STORAGE_KEY).then((raw) => {
+      if (!raw || userMoved) return;
+      try {
+        const data = JSON.parse(raw);
+        if (typeof data.x !== 'number' || typeof data.y !== 'number') return;
+        try { localStorage.setItem(STORAGE_KEY, raw); } catch (e) {}
+        pos = { x: Math.min(Math.max(data.x, 0), window.innerWidth - 40), y: Math.min(Math.max(data.y, 0), window.innerHeight - 40) };
+        orientation = computeOrientation();
+        const bar = findTabBar();
+        if (bar) applyStyle(bar, true);
+      } catch (e) {}
+    });
+  }
 
   const applyStyle = (container, force) => {
     if (!container) return;
@@ -203,6 +335,7 @@
       const end = () => {
         if (!dragging) return;
         dragging = false;
+        userMoved = true;
         orientation = computeOrientation();
         applyStyle(container, true);
         savePos();
